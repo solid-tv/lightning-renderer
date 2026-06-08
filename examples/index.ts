@@ -141,6 +141,70 @@ const platformMap = {
   console.error(err);
 });
 
+/**
+ * Live on-screen stats overlay for device debugging (`?debug=true`).
+ *
+ * @remarks
+ * Driven entirely by the `fpsUpdate` event so it works without DevTools — handy
+ * on TVs. Surfaces fps plus the per-interval WebGL call counts (draw calls,
+ * texture binds, program switches, attribute pointers) for comparing rendering
+ * cost across scenes/renderers. Uses the SDF text renderer: the Canvas renderer
+ * rasterizes a fresh texture on every text change, and this overlay's text
+ * changes every interval, which would leak memory over a long run.
+ */
+function createDebugOverlay(renderer: RendererMain): void {
+  renderer.createNode({
+    x: 0,
+    y: 0,
+    w: 600,
+    h: 140,
+    color: 0x000000cc,
+    zIndex: 100000,
+    parent: renderer.root,
+  });
+
+  const text = renderer.createTextNode({
+    x: 14,
+    y: 10,
+    w: 580,
+    contain: 'width',
+    color: 0x33ff88ff,
+    fontFamily: 'Ubuntu',
+    textRendererOverride: 'sdf',
+    fontSize: 26,
+    lineHeight: 30,
+    zIndex: 100001,
+    text: 'debug: waiting for fpsUpdate…',
+    parent: renderer.root,
+  });
+
+  renderer.on('fpsUpdate', (_target: RendererMain, d: FpsUpdatePayload) => {
+    const spy = d.contextSpyData;
+    const lines = [`FPS ${d.fps}`];
+
+    if (spy !== null) {
+      let total = 0;
+      for (const key in spy) {
+        total += spy[key]!;
+      }
+      const at = (k: string): number => spy[k] ?? 0;
+      lines.push(`GL calls/interval: ${total}`);
+      lines.push(
+        `drawElements ${at('drawElements')}  bindTexture ${at('bindTexture')}`,
+      );
+      lines.push(
+        `useProgram ${at('useProgram')}  vAttribPtr ${at(
+          'vertexAttribPointer',
+        )}`,
+      );
+    } else {
+      lines.push('(enable contextSpy for GL call counts)');
+    }
+
+    text.text = lines.join('\n');
+  });
+}
+
 async function runTest(
   test: string,
   renderMode: string,
@@ -165,11 +229,16 @@ async function runTest(
 
   const module = await testModule();
 
+  // `?debug=true` shows a live on-screen stats overlay. It needs periodic
+  // fpsUpdate events and the context spy (for GL call counts), so force them on.
+  const debug = urlParams.get('debug') === 'true';
+
   const customSettings: Partial<RendererMainSettings> = {
     ...(typeof module.customSettings === 'function'
       ? module.customSettings(urlParams)
       : {}),
     ...(globalTargetFPS !== undefined && { targetFPS: globalTargetFPS }),
+    ...(debug && { enableContextSpy: true, fpsUpdateInterval: 500 }),
   };
 
   const { renderer, appElement } = await initRenderer(
@@ -246,6 +315,13 @@ async function runTest(
   };
 
   await module.default(exampleSettings);
+
+  // Created last so the overlay's nodes are appended after the test content and
+  // stay on top (a high zIndex alone isn't enough — appending zIndex-0 content
+  // after the overlay does not always re-sort the root's children).
+  if (debug) {
+    createDebugOverlay(renderer);
+  }
 }
 
 async function initRenderer(
