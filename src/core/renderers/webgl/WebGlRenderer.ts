@@ -112,7 +112,9 @@ export class WebGlRenderer extends CoreRenderer {
     const platform = stage.platform;
     const canvas = platform.canvas!;
 
-    const glw = (this.glw = platform.createContext() as GlContextWrapper);
+    const glw = (this.glw = platform.createContext(
+      stage.contextSpy,
+    ) as GlContextWrapper);
     glw.viewport(0, 0, canvas.width, canvas.height);
 
     this.updateClearColor(stage.clearColor);

@@ -21,6 +21,7 @@ import { type Stage } from '../Stage.js';
 import type { WebGlContextWrapper } from './web/WebGlContextWrapper.js';
 import type { ImageResponse } from '../textures/ImageTexture.js';
 import type { GlContextWrapper } from './GlContextWrapper.js';
+import type { ContextSpy } from '../lib/ContextSpy.js';
 
 /**
  * Settings for the Platform
@@ -74,8 +75,12 @@ export abstract class Platform {
 
   /**
    * Create new rendering context (only for WebGL, Canvas does not require a context)
+   *
+   * @param contextSpy - When provided, the underlying GL context is instrumented
+   * so each GL method call is counted (surfaced via the `fpsUpdate` event's
+   * `contextSpyData`). Pass `null` to skip instrumentation.
    */
-  abstract createContext(): GlContextWrapper;
+  abstract createContext(contextSpy: ContextSpy | null): GlContextWrapper;
 
   /**
    * Get a DOM element by ID

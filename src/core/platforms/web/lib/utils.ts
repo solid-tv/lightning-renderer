@@ -17,6 +17,8 @@
  * limitations under the License.
  */
 
+import type { ContextSpy } from '../../../lib/ContextSpy.js';
+
 export const PROTOCOL_REGEX = /^(data|ftps?|https?):/;
 
 export function isBase64Image(src: string) {
@@ -76,6 +78,7 @@ export function convertUrlToAbsolute(url: string): string {
 export function createWebGLContext(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   forceWebGL2 = false,
+  contextSpy: ContextSpy | null = null,
 ): WebGLRenderingContext {
   const config: WebGLContextAttributes = {
     alpha: true,
@@ -99,6 +102,20 @@ export function createWebGLContext(
       )) as unknown as WebGLRenderingContext | null;
   if (!gl) {
     throw new Error('Unable to create WebGL context');
+  }
+
+  if (contextSpy) {
+    // Proxy the GL context so every GL method call is counted by the spy.
+    return new Proxy(gl, {
+      get(target, prop) {
+        const value = target[prop as never] as unknown;
+        if (typeof value === 'function') {
+          contextSpy.increment(String(prop));
+          return (value as (...args: unknown[]) => unknown).bind(target);
+        }
+        return value;
+      },
+    });
   }
 
   return gl;

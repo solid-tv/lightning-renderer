@@ -36,6 +36,7 @@ import { loadSvg } from './lib/textureSvg.js';
 import { loadCompressedTexture } from './lib/textureCompression.js';
 import { WebGlContextWrapper } from './WebGlContextWrapper.js';
 import type { GlContextWrapper } from '../GlContextWrapper.js';
+import type { ContextSpy } from '../../lib/ContextSpy.js';
 
 /**
  * make fontface add not show errors
@@ -82,12 +83,16 @@ export class WebPlatform extends Platform {
     return document.createElement('canvas');
   }
 
-  override createContext(): GlContextWrapper {
+  override createContext(contextSpy: ContextSpy | null): GlContextWrapper {
     if (this.canvas === null) {
       throw new Error('Canvas has not been created yet.');
     }
 
-    const gl = createWebGLContext(this.canvas, this.settings.forceWebGL2);
+    const gl = createWebGLContext(
+      this.canvas,
+      this.settings.forceWebGL2,
+      contextSpy,
+    );
     this.glw = new WebGlContextWrapper(gl);
     return this.glw;
   }
