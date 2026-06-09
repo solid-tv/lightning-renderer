@@ -2,6 +2,7 @@ import {
   type CoreShaderNode,
   type FpsUpdatePayload,
   type INode,
+  type QuadsUpdatePayload,
   type RendererMain,
 } from '@lightningjs/renderer';
 import type { ExampleSettings } from '../common/ExampleSettings.js';
@@ -14,17 +15,15 @@ import environment from '../assets/robot/environment.png';
 import elevator from '../assets/robot/elevator-background.png';
 
 /**
- * TV animation stress test (FPS + VAO focus) — "how many moving cards?".
+ * TV animation stress test (FPS focus) — "how many moving cards?".
  *
  * Sibling of `stress-tv`, but **dynamic**. `stress-tv` builds a static grid:
- * once built nothing changes per frame, render is cheap, FPS pins at the panel's
- * vsync (~60), and VAO makes no visible difference. Here the scene is built once
- * and then **animated with `node.animate()`** — every row container slides its
- * x/y forever, so every frame has changing transforms -> nodes go dirty -> they
- * are re-uploaded and re-drawn -> the per-draw attribute-binding cost is paid
- * every frame. That is exactly where VAO matters (one `bindVertexArray` per draw
- * vs N x `vertexAttribPointer` + `enableVertexAttribArray`), so FPS is a
- * meaningful metric and the VAO delta is measurable.
+ * once built nothing changes per frame, render is cheap, and FPS pins at the
+ * panel's vsync (~60). Here the scene is built once and then **animated with
+ * `node.animate()`** — every row container slides its x/y forever, so every frame
+ * has changing transforms -> nodes go dirty -> they are re-uploaded and re-drawn
+ * every frame. That sustained per-frame work is what makes FPS a meaningful
+ * metric: as more cards are added FPS falls, and the ramp measures where.
  *
  * What it measures: start with 100 animated cards, then **keep appending more**
  * (never destroying/recreating what exists) until the sustained FPS falls to the
@@ -32,7 +31,7 @@ import elevator from '../assets/robot/elevator-background.png';
  * and a **summary screen** reports how many cards were animated and how many
  * nodes were drawn. A live debug panel (top-left) and FPS counter (top-right) are
  * on the whole time — no ?debug=true needed (though passing it adds the per-draw
- * GL-call counts that reveal the VAO signature).
+ * GL-call counts from the context spy).
  *
  * Scene: a real TV home screen — a vertical stack of rows (rails), each a parent
  * node holding a horizontal strip of cards (rounded-rect bg + cycled image
@@ -42,16 +41,12 @@ import elevator from '../assets/robot/elevator-background.png';
  * costing a draw — no existing card is ever moved or recreated, only new ones are
  * appended.
  *
- * Run with the live overlay for FPS / draw-call / quad / VAO read-out:
+ * Run with the live overlay for an FPS / quad / draw-call read-out. This
+ * renderer's `fpsUpdate` payload is `{ fps, contextSpyData }`; quad counts arrive
+ * on a separate `quadsUpdate` event, and per-draw GL-call counts (drawElements,
+ * bindTexture, useProgram, ...) are only populated when the context spy is on,
+ * which `?debug=true` enables:
  *   ?test=stress-animation&debug=true
- *
- * A/B the VAO optimization by reloading with and without (it is fixed at renderer
- * construction — you cannot flip it at runtime):
- *   ?test=stress-animation&debug=true            (VAO on  -> more cards @ target)
- *   ?test=stress-animation&debug=true&novao=true (VAO off -> fewer cards @ target)
- * With VAO off the overlay's `vertexAttribPointer` / `enableVertexAttribArray`
- * climb with the draw count and `bindVAO` stays 0; with VAO on those stay ~0 and
- * `bindVAO` tracks the draw count.
  *
  * Tunables (URL params):
  *   ?targetfps=10  FPS floor that ends the ramp (default 10)
@@ -60,9 +55,9 @@ import elevator from '../assets/robot/elevator-background.png';
  */
 
 // Distinct image sources cycled per card so the batcher has to switch textures —
-// that is what makes attribute re-binding (and thus the VAO win) actually show
-// up in the numbers. Only 6 unique sources, so after the first rows load every
-// later card reuses a cached texture (no upload cost as the scene grows).
+// the bindTexture / draw-call churn that shows up in the GL counts. Only 6 unique
+// sources, so after the first rows load every later card reuses a cached texture
+// (no upload cost as the scene grows).
 const IMAGES = [lightning, rocko, testscreen, robot, environment, elevator];
 
 const APP_W = 1920;
@@ -133,7 +128,6 @@ export default async function test({
 }: ExampleSettings) {
   const params = new URLSearchParams(window.location.search);
   const targetFps = Number(params.get('targetfps') ?? 10);
-  const vaoOff = params.get('novao') === 'true';
   const startCount = Math.max(
     COLS,
     Math.round(Number(params.get('start') ?? 100) * perfMultiplier),
@@ -247,7 +241,7 @@ export default async function test({
         parent: row,
       });
 
-      // Image thumbnail (cycled source -> texture switches -> VAO-relevant work).
+      // Image thumbnail (cycled source -> texture switches -> bindTexture work).
       renderer.createNode({
         x: GAP * 0.5,
         y: GAP * 0.5,
@@ -277,19 +271,25 @@ export default async function test({
   // wired at construction — pass ?debug=true to also get those.
   renderer.stage.options.fpsUpdateInterval = 500;
 
-  let sumBackend = 'webgl';
-  let sumVao = vaoOff === true ? 'off' : 'on';
+  // Backend ('webgl' | 'canvas') is fixed at construction, not on the fpsUpdate
+  // payload — read it straight off the renderer.
+  const sumBackend = renderer.stage.renderer.mode ?? 'webgl';
 
-  // Latest GL-call sample from fpsUpdate. Updated every interval so that, just
-  // before teardown, we can freeze the values from the LIVE animated scene
-  // (rather than the idle summary, where drawElem collapses to ~10).
-  let liveHasSpy: boolean = false;
-  let liveDraws = 0;
+  // Quad count rides on a SEPARATE `quadsUpdate` event in this renderer (not on
+  // the fpsUpdate payload), so track the latest sample here.
   let liveQuads = 0;
-  let liveVAttrib = 0;
-  let liveEnaVAA = 0;
-  let liveBindVao = 0;
+  renderer.on('quadsUpdate', (_t: RendererMain, d: QuadsUpdatePayload) => {
+    liveQuads = d.quads;
+  });
+
+  // Latest GL-call sample from fpsUpdate's contextSpyData (only present with
+  // ?debug=true). Updated every interval so that, just before teardown, we can
+  // freeze the values from the LIVE animated scene (rather than the idle summary,
+  // where drawElements collapses to the few overlay draws).
+  let liveHasSpy: boolean = false;
   let liveDrawElem = 0;
+  let liveBindTex = 0;
+  let liveUseProg = 0;
   let liveGlTotal = 0;
 
   renderer.createNode({
@@ -317,43 +317,31 @@ export default async function test({
   });
 
   renderer.on('fpsUpdate', (_t: RendererMain, d: FpsUpdatePayload) => {
-    const c = d.capabilities;
     const spy = d.contextSpyData;
-    const backend =
-      c.renderMode === 'webgl' ? `webgl${c.webGlVersion ?? ''}` : c.renderMode;
-    sumBackend = backend;
-    sumVao = c.vertexArrayObject === true ? 'on' : 'off';
 
-    liveDraws = d.renderOps;
-    liveQuads = d.quads;
-
-    const lines = [
-      `FPS ${d.fps}   draws ${d.renderOps}   quads ${d.quads}`,
-      `${backend}  VAO:${sumVao}  tex ${c.maxTextureSize}/${c.maxTextureUnits}`,
-    ];
+    // FPS first — the headline metric. quads come from the quadsUpdate event
+    // tracked above; with the spy on, drawElements is the per-interval draw-call
+    // count (there is no renderOps field on this renderer's payload).
+    const lines = [`FPS ${d.fps}   quads ${liveQuads}`, `${sumBackend}`];
     if (spy !== null) {
       let total = 0;
       for (const key in spy) {
         total += spy[key]!;
       }
       const at = (k: string): number => spy[k] ?? 0;
-      const bindVao = at('bindVertexArray') + at('bindVertexArrayOES');
       // Stash the live sample for the summary's frozen "during animation" block.
       liveHasSpy = true;
-      liveVAttrib = at('vertexAttribPointer');
-      liveEnaVAA = at('enableVertexAttribArray');
-      liveBindVao = bindVao;
       liveDrawElem = at('drawElements');
+      liveBindTex = at('bindTexture');
+      liveUseProg = at('useProgram');
       liveGlTotal = total;
       lines.push(`GL calls/interval: ${total}`);
       lines.push(
-        `vAttribPtr ${at('vertexAttribPointer')}  enaVAA ${at(
-          'enableVertexAttribArray',
-        )}`,
+        `drawElem ${at('drawElements')}  bindTex ${at('bindTexture')}`,
       );
       lines.push(
-        `bindVAO ${bindVao}  drawElem ${at('drawElements')}  prog ${at(
-          'useProgram',
+        `useProgram ${at('useProgram')}  vAttribPtr ${at(
+          'vertexAttribPointer',
         )}`,
       );
     } else {
@@ -409,9 +397,8 @@ export default async function test({
 
   const updateHud = (fps: number): void => {
     hud.text =
-      `elements ${count}   fps ${Math.round(fps)}   VAO ${
-        vaoOff === true ? 'off' : 'on'
-      }\n` + `growing until <= ${targetFps} fps...`;
+      `elements ${count}   fps ${Math.round(fps)}\n` +
+      `growing until <= ${targetFps} fps...`;
   };
 
   // Build the initial batch static, let its textures load and the renderer go
@@ -457,12 +444,10 @@ export default async function test({
   hud.text = `holding ${count} cards (capturing live GL)...`;
   await measureFps(40); // ~several fpsUpdate intervals at the final (low) FPS
   const liveSpy = Boolean(liveHasSpy);
-  const capDraws = liveDraws;
   const capQuads = liveQuads;
-  const capVAttrib = liveVAttrib;
-  const capEnaVAA = liveEnaVAA;
-  const capBindVao = liveBindVao;
   const capDrawElem = liveDrawElem;
+  const capBindTex = liveBindTex;
+  const capUseProg = liveUseProg;
   const capGlTotal = liveGlTotal;
 
   // ---- Summary screen -------------------------------------------------------
@@ -502,7 +487,7 @@ export default async function test({
       `Nodes drawn:       ${drawnNodes}   (bg + thumbnail / card)\n` +
       `Animated rows:     ${animatedRows}   (drivers; every card moves)\n` +
       `Scene-graph nodes: ${sceneNodes}\n` +
-      `Backend / VAO:     ${sumBackend} / ${sumVao}`,
+      `Backend:           ${sumBackend}`,
   });
 
   // Per-adjustment average FPS — the full FPS-vs-load curve from the ramp.
@@ -530,15 +515,14 @@ export default async function test({
   });
 
   // LIVE GL block, left column — the GL-call sample frozen DURING animation at
-  // the final card count (not the idle summary). This is the real per-frame
-  // rebind cost: with VAO off, vAttribPtr/enaVAA climb with the draw count and
-  // bindVAO stays 0; with VAO on, those are ~0 and bindVAO tracks drawElem.
+  // the final card count (not the idle summary). drawElements is the per-interval
+  // draw-call count under sustained animation; bindTexture climbs with the
+  // texture switches the card cycle forces.
   const liveBlock =
     liveSpy === true
       ? `LIVE GL @ ${animatedCards} cards (animating)\n` +
-        `draws ${capDraws}  quads ${capQuads}\n` +
-        `vAttribPtr ${capVAttrib}  enaVAA ${capEnaVAA}\n` +
-        `bindVAO ${capBindVao}  drawElem ${capDrawElem}\n` +
+        `quads ${capQuads}  drawElem ${capDrawElem}\n` +
+        `bindTex ${capBindTex}  useProgram ${capUseProg}\n` +
         `GL calls/interval: ${capGlTotal}`
       : `LIVE GL @ ${animatedCards} cards (animating)\n` +
         '(add &debug=true to capture per-draw GL-call counts)';
@@ -572,21 +556,18 @@ export default async function test({
     parent: testRoot,
     text:
       'Note: the top-left panel now samples the IDLE summary (scene torn\n' +
-      'down, drawElem ~10) and understates the per-frame rebind count. The\n' +
-      'LIVE GL block above is the animated sample. The relative signature\n' +
-      '(zero rebinds with VAO, nonzero without; bindVAO tracking draws) is\n' +
-      'exactly as predicted; the FPS curve (right) is the real animated cost.',
+      'down, drawElem collapses to the few overlay draws) and understates the\n' +
+      'per-frame cost. The LIVE GL block above is the animated sample. The FPS\n' +
+      'curve (right) is the real animated cost as the card count grew.',
   });
 
-  console.log(
-    `\n=== stress-animation result (VAO ${sumVao.toUpperCase()}) ===`,
-  );
+  console.log(`\n=== stress-animation result (${sumBackend}) ===`);
   console.log(
     `${animatedCards} animated cards, ${drawnNodes} nodes drawn, final avg ${finalFps} fps (stopped: ${reason})`,
   );
   if (liveSpy === true) {
     console.log(
-      `LIVE GL @ ${animatedCards} cards: vAttribPtr ${capVAttrib}, enaVAA ${capEnaVAA}, bindVAO ${capBindVao}, drawElem ${capDrawElem}, total ${capGlTotal}/interval`,
+      `LIVE GL @ ${animatedCards} cards: drawElem ${capDrawElem}, bindTex ${capBindTex}, useProgram ${capUseProg}, total ${capGlTotal}/interval`,
     );
   }
   console.table(
